@@ -135,4 +135,4 @@ dmypy.json
 shimmer_sent_to.csv
 
 ~.lock*
-crew3*
+*.csv
