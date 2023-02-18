@@ -49,7 +49,7 @@ logger.addHandler(stream_handler)
 # Shimmer wallet configurations
 ##########################
 client_options = {
-    "nodes": ["https://api.shimmer.network"],
+    "nodes": ["https://api.testnet.shimmer.network"],
 }
 coin_type = 4219
 secret_manager = StrongholdSecretManager(stronghold_db_name, stronghold_password)
