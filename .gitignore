@@ -129,10 +129,13 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Shimmer
+# Shimmer database
 *.stronghold
 *-database/
-shimmer_sent_to.csv
 
+# Project specific CSV that can contain sensitive data
+recepients_addresses.csv
+shimmer_sent_to.csv
+crew3_shimmer_address.csv
+crew3_airdrop_export.csv
 ~.lock*
-*.csv
