@@ -1,4 +1,5 @@
 import csv
+import itertools
 import logging
 import os
 import sys
@@ -49,12 +50,14 @@ logger.addHandler(stream_handler)
 # Shimmer wallet configurations
 ##########################
 client_options = {
-    "nodes": ["https://api.testnet.shimmer.network"],
+    "nodes": ["https://api.shimmer.network"],
 }
 coin_type = 4219
 secret_manager = StrongholdSecretManager(stronghold_db_name, stronghold_password)
 client = IotaClient(client_options)
 
+# Define the chunk size of bulk transactions
+chunk_size = 127
 
 ##########################
 # Start
@@ -134,50 +137,71 @@ def verify_content(csv_content, invalid_rows):
 
 def send_to_list():
     """Read the CSV file and send SMR tokens to the corresponding addresses."""
+    global chunk_size
     logger.debug("I am in send_to_list")
     invalid_rows = []
+    # Define the outputs array
+    outputs = []
 
-    try:
-        # Read the CSV list of receiver addresses (all addresses are in column A)
-        with open(shimmer_address_read_from_filename, encoding="UTF8") as file:
-            csv_file = file
-            csv_content = csv_file.read()
+    # Read the CSV file in chunks
+    with open(shimmer_address_read_from_filename, encoding="UTF8") as file:
+        csv_file = file
+        csv_content = csv_file.read()
+        # Verify the addresses and log any invalid rows
+        if verify_content(csv_content, invalid_rows):
+            logger.info(f"Invalid rows found\n {invalid_rows}")
+            logger.info("Please correct the addresses and try again.")
+        else:
+            logger.info("Addresses are valid. We continue.")
+            logger.debug(f"CSV content: {csv_content}")
 
-            # Verify the addresses and log any invalid rows
-            if verify_content(csv_content, invalid_rows):
-                logger.info(f"Invalid rows found\n {invalid_rows}")
-                logger.info("Please correct the addresses and try again.")
-            else:
-                logger.info("Addresses are valid. We continue.")
-                logger.debug(f"CSV content: {csv_content}")
-                # Iterate over each row in the CSV and send SMR tokens
-                csv_reader = csv.reader(csv_content.splitlines())
-                next(csv_reader)  # skip the header row
-                for row in enumerate(csv_reader):
-                    try:
-                        logger.debug(f"Line: {row[1]}")
-                        address = str(
-                            row[1][1]
-                        )  # address in column B, [1][0] for column A
-                        send_smr_tokens(address)
-                    except Exception:
-                        logger.info(traceback.format_exc())
-    except Exception:
-        logger.info(traceback.format_exc())
+    with open(shimmer_address_read_from_filename, encoding="UTF8") as file:
+        # csv_reader = csv.reader(file)
+        # header = next(csv_reader)  # skip the header row
+
+        while True:
+            # Create a new csv_reader object for each chunk of rows
+            rows = list(itertools.islice(csv.reader(file), chunk_size))
+
+            # Check if we've reached the end of the file
+            if not rows:
+                break
+
+            # Process the rows in the chunk
+            for row in rows:
+                try:
+                    logger.debug(f"Line: {row}")
+                    address = str(row[1])  # address in column B, [0] for column A
+                    # amount = int(row[2])   # amount in column C, [1] for column B
+                    amount = shimmer_smr_token_amount  # amount from .env
+                    outputs.append({"address": address, "amount": amount})
+                except (IndexError, ValueError) as e:
+                    logger.warning(f"Error processing row {row}: {e}")
+                    invalid_rows.append(row)
+
+            # Call send_smr_tokens with the outputs array
+            # send_smr_tokens(str(outputs))
+            send_smr_tokens(outputs)
+            outputs = []
 
 
-def get_transaction_status(pending_transactions, shimmer_receiver_address):
+def get_transaction_status(pending_transactions, outputs):
     """Gets the transaction status and returns the block ID and shimmer receiver address."""
     logger.debug(pending_transactions)
+    # Loop through each pending transaction
+    for tx in pending_transactions:
+        # Check if the transaction's networkId is the mainnet (14364762045254553490)
+        if tx["networkId"] == "14364762045254553490":
+            # Get the blockId for this transaction
+            block_id = tx["blockId"]
+            logger.info(f"Block ID: {block_id}")
+            # Do something with the blockId
+            check_transaction_confirm(block_id, outputs)
 
-    block_id = pending_transactions[0]["blockId"]
-    logger.debug(f"Block ID: {block_id}")
-    check_transaction_confirm(block_id, shimmer_receiver_address)
-
-    return block_id, shimmer_receiver_address
+    return block_id
 
 
-def check_transaction_confirm(block_id, shimmer_receiver_address):
+def check_transaction_confirm(block_id, outputs):
     """Checks whether the transaction has been confirmed by the ledger and waits until it has been."""
     logger.debug(f"block_id: {block_id}")
 
@@ -193,24 +217,41 @@ def check_transaction_confirm(block_id, shimmer_receiver_address):
         if ledger_inclusion_state is not None:
             # Transaction has been confirmed
             logger.info("Transaction has been confirmed.")
-            write_to_csv(
-                shimmer_receiver_address,
-                shimmer_smr_token_amount,
-                block_id,
-            )
+            for item in outputs:
+                address = item["address"]
+                write_to_csv(address, shimmer_smr_token_amount, block_id)
             return block_id
         else:
             # Wait for 10 seconds before checking again
             time.sleep(10)
 
 
-def check_enough_balance(account_status, shimmer_receiver_address):
+def get_max_chunk_size(account_status):
     global shimmer_smr_token_amount
+
     available_balance = int(account_status["baseCoin"]["available"])
-    if available_balance >= int(shimmer_smr_token_amount):
+    max_chunk_size = available_balance // int(shimmer_smr_token_amount)
+    return max_chunk_size
+
+
+def check_enough_balance(account_status):
+    """
+    Checks whether the account has enough balance to send the tokens.
+    """
+    global shimmer_smr_token_amount
+    global chunk_size
+
+    available_balance = int(account_status["baseCoin"]["available"])
+    required_balance = int(shimmer_smr_token_amount) * int(chunk_size)
+    logger.info(f"Required balance: {required_balance}")
+    logger.info(f"Available balance: {available_balance}")
+
+    if available_balance >= required_balance:
         return
     else:
-        logger.info(f"Impossible to send to {shimmer_receiver_address}")
+        get_max_chunk_size(account_status)
+
+        logger.info("Impossible to send")
         raise ValueError("Not enough balance")
 
 
@@ -242,35 +283,33 @@ def write_to_csv(shimmer_receiver_address, shimmer_smr_token_amount, block_id):
         )
 
 
-def send_smr_tokens(shimmer_receiver_address):
+def send_smr_tokens(outputs):
     """Sends SMR tokens to a single address."""
     global shimmer_smr_token_amount
+    logger.info("Received bulk outputs.")
+    logger.debug(f"Received bulk outputs: {outputs}")
     try:
         # Sync account with the node
         wallet = IotaWallet(wallet_db_name, client_options, coin_type, secret_manager)
         account = wallet.get_account(shimmer_account_name)
+        logger.info("Account retrieved")
+        address = account.addresses()
+        logger.info(f"Address: {address}")
+        balance = account.get_balance()
+        logger.info(f"Balance: {balance}")
+        time.sleep(5)
         account_status = account.sync()
         logger.info("Account Synced")
-        logger.debug(f"Account status: {account_status}")
-        consolidate_account = account.consolidate_outputs(foce=True, max_outputs=100)
-        logger.info("Account Consolidated")
-        logger.debug(f"Account consolidation: {consolidate_account}")
 
         # Verify if there is enough balance
-        check_enough_balance(account_status, shimmer_receiver_address)
+        # check_enough_balance(account_status, shimmer_receiver_address)
+        check_enough_balance(account_status)
 
         # Set the Stronghold password
         wallet.set_stronghold_password(stronghold_password)
 
         # Define the output transaction
-        logger.debug(f"Shimmer address: {shimmer_receiver_address}")
         logger.debug(f"Shimmer amount: {shimmer_smr_token_amount}")
-        outputs = [
-            {
-                "address": shimmer_receiver_address,
-                "amount": shimmer_smr_token_amount,
-            }
-        ]
         logger.debug(f"Outputs: {outputs}")
 
         try:
@@ -278,7 +317,8 @@ def send_smr_tokens(shimmer_receiver_address):
             account.send_amount(outputs)
             logger.info("Transaction sent")
             pending_transactions = account.pending_transactions()
-            get_transaction_status(pending_transactions, shimmer_receiver_address)
+            logger.debug(f"Pending transactions: {pending_transactions}")
+            get_transaction_status(pending_transactions, outputs)
 
         except Exception:
             logger.info(traceback.format_exc())
@@ -292,8 +332,75 @@ def send_smr_tokens(shimmer_receiver_address):
         logger.info(traceback.format_exc())
 
 
+####################
+# DEBUG STUFF
+####################
+
+# def consolidate_accounts():
+#     # Sync account with the node
+#     wallet = IotaWallet(wallet_db_name, client_options, coin_type, secret_manager)
+#     #account = wallet.create_account(alias="ttea", bech32_hrp="smr")
+
+#     account = wallet.get_account("TEst")
+#     #account = wallet.get_account("tea")
+#     #account = wallet.get_account("ttea")
+#     address = wallet.get_account_data("TEst")
+#     logger.debug(f"Address: {address}")
+# accounts = wallet.get_accounts()
+# logger.debug(f"Accounts: {accounts}")
+# time.sleep(15)
+# sys.exit(1)
+
+
+# account_status = account.sync()
+# logger.info("Account Synced")
+# logger.debug(f"Account status: {account_status}")
+# balance = account.get_balance()
+# logger.info(f"Balance: {balance}")
+
+# consolidate_account = account.consolidate_outputs(force=True, output_consolidation_threshold=127)
+# logger.info("Account Consolidated")
+# logger.debug(f"Account consolidation: {consolidate_account}")
+# account_status = account.sync()
+# logger.info("Account Synced")
+# logger.debug(f"Account status: {account_status}")
+# balance = account.get_balance()
+# logger.info(f"Balance: {balance}")
+
+# outputs_count = []
+# outputs = account.unspent_outputs()
+# logger.debug(f"Outputs: {outputs}")
+# outputs_list = outputs
+# for output in outputs_list:
+#     outputs_count.append(output['outputId'])
+
+# output_number = len(outputs_count)
+
+# logger.info(f"Outputs count: {output_number}")
+
+# # while outputs_count > 0:
+# consolidate_account = account.consolidate_outputs(force=True, output_consolidation_threshold=1)
+# logger.info("Account Consolidated")
+# logger.debug(f"Account consolidation: {consolidate_account}")
+
+# time.sleep(15)
+# account_status = account.sync()
+# logger.info("Account Synced")
+# logger.debug(f"Account status: {account_status}")
+# balance = account.get_balance()
+# logger.info(f"Balance: {balance}")
+# outputs = [
+#     {
+#     "address": "smr1qz8vmj53g25ss2ssdm7u3ugm6ehxxepxn05fzqwltdjxu4l9jek32kt350w",
+#     "amount": "763000000",
+#     }
+# ]
+# account.send_amount(outputs)
+
+
 def main():
     if basic_checks():
+        # consolidate_accounts() # DEBUG
         create_shimmer_profile()
         send_to_list()
     else:
